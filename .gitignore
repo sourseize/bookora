@@ -1,1 +1,36 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+build/
+.vite/
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+
+# Local database files
+*.sqlite
+*.sqlite3
+*.db
+*.db-journal
+
+# Logs and temporary files
+*.log
+npm-debug.log*
+*.tmp
+*.temp
+
+# Editor and operating-system files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Coverage and generated artifacts
+coverage/
+
+# Original product brief is kept locally as source material
 plan/
