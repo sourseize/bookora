@@ -15,6 +15,9 @@ build/
 *.sqlite
 *.sqlite3
 *.db
+*.sqlite-*
+*.sqlite3-*
+*.db-*
 *.db-journal
 
 # Logs and temporary files
