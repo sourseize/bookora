@@ -80,6 +80,36 @@ const acceptInvitationSchema = z.object({
   name: z.string().trim().min(2).max(80),
   password: passwordSchema,
 });
+const businessSettingsSchema = z.object({
+  name: z.string().trim().min(2).max(100),
+  timeZone: z.string().trim().min(1).max(100),
+  locale: z.string().trim().min(2).max(40),
+  currency: z.string().trim().length(3).transform((value) => value.toUpperCase()),
+});
+const serviceSchema = z.object({
+  name: z.string().trim().min(2).max(100),
+  description: z.string().trim().max(1000).default(""),
+  durationMinutes: z.number().int().min(5).max(1440),
+  priceMinor: z.number().int().min(0).max(1_000_000_000),
+  priceCurrency: z
+    .string()
+    .trim()
+    .length(3)
+    .transform((value) => value.toUpperCase()),
+  bufferMinutes: z.number().int().min(0).max(240).default(0),
+  category: z.string().trim().max(60).default(""),
+  onlineBooking: z.boolean().default(true),
+  isActive: z.boolean().default(true),
+  staffIds: z.array(z.string().uuid()).max(100).default([]),
+});
+
+type BusinessPublicDetails = {
+  id: string;
+  name: string;
+  timeZone: string;
+  locale: string;
+  currency: string;
+};
 
 const csrfGuard: RequestHandler = (req, res, next) => {
   if (req.get("x-bookora-request") !== "1") {
@@ -173,6 +203,128 @@ function getUserById(id: string): AuthUser {
     throw new Error("The newly created account could not be loaded.");
   }
   return user;
+}
+
+function validTimeZone(value: string): boolean {
+  try {
+    new Intl.DateTimeFormat("en", { timeZone: value });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function validLocale(value: string): boolean {
+  try {
+    return Intl.getCanonicalLocales(value).length === 1;
+  } catch {
+    return false;
+  }
+}
+
+function validCurrency(value: string): boolean {
+  try {
+    new Intl.NumberFormat("en", { style: "currency", currency: value });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function businessIdForRequest(
+  req: express.Request,
+  res: Response,
+): string | undefined {
+  if (!req.user?.businessId) {
+    res.status(403).json({ error: "This account is not linked to a business." });
+    return undefined;
+  }
+  return req.user.businessId;
+}
+
+function validateServiceStaff(
+  businessId: string,
+  staffIds: string[],
+): boolean {
+  if (staffIds.length === 0) {
+    return true;
+  }
+  const placeholders = staffIds.map(() => "?").join(", ");
+  const result = db
+    .prepare(
+      `SELECT COUNT(*) AS count FROM users
+       WHERE business_id = ? AND role = 'staff' AND id IN (${placeholders})`,
+    )
+    .get(businessId, ...staffIds) as { count: number };
+  return result.count === staffIds.length;
+}
+
+function replaceServiceStaff(
+  businessId: string,
+  serviceId: string,
+  staffIds: string[],
+): void {
+  const createdAt = new Date().toISOString();
+  const insert = db.prepare(
+    `INSERT INTO staff_services
+     (business_id, staff_user_id, service_id, created_at)
+     VALUES (?, ?, ?, ?)`,
+  );
+  for (const staffId of staffIds) {
+    insert.run(businessId, staffId, serviceId, createdAt);
+  }
+}
+
+function listBusinessServices(businessId: string) {
+  const services = db
+    .prepare(
+      `SELECT id, name, description, duration_minutes AS durationMinutes,
+              price_minor AS priceMinor, price_currency AS priceCurrency,
+              buffer_minutes AS bufferMinutes,
+              category, online_booking AS onlineBooking, is_active AS isActive,
+              created_at AS createdAt, updated_at AS updatedAt
+       FROM services WHERE business_id = ?
+       ORDER BY is_active DESC, name COLLATE NOCASE`,
+    )
+    .all(businessId) as Array<{
+    id: string;
+    name: string;
+    description: string;
+    durationMinutes: number;
+    priceMinor: number;
+    priceCurrency: string;
+    bufferMinutes: number;
+    category: string | null;
+    onlineBooking: number;
+    isActive: number;
+    createdAt: string;
+    updatedAt: string;
+  }>;
+  const staffAssignments = db
+    .prepare(
+      `SELECT ss.service_id AS serviceId, ss.staff_user_id AS staffId
+       FROM staff_services ss
+       JOIN services s ON s.id = ss.service_id
+       WHERE ss.business_id = ? AND s.business_id = ?`,
+    )
+    .all(businessId, businessId) as Array<{
+    serviceId: string;
+    staffId: string;
+  }>;
+  const assignments = new Map<string, string[]>();
+  for (const assignment of staffAssignments) {
+    const staffIds = assignments.get(assignment.serviceId) ?? [];
+    staffIds.push(assignment.staffId);
+    assignments.set(assignment.serviceId, staffIds);
+  }
+
+  return services.map((service) => ({
+    ...service,
+    category: service.category ?? "",
+    onlineBooking: Boolean(service.onlineBooking),
+    isActive: Boolean(service.isActive),
+    staffIds: assignments.get(service.id) ?? [],
+  }));
 }
 
 app.get("/api/health", (_req, res) => {
@@ -494,17 +646,24 @@ app.get(
   requireAuth,
   requireRole("owner", "staff"),
   (req, res) => {
-    if (!req.user?.businessId) {
-      res.status(403).json({ error: "This account is not linked to a business." });
+    const businessId = businessIdForRequest(req, res);
+    if (!businessId) {
       return;
     }
 
     const business = db
       .prepare(
-        "SELECT id, name, time_zone AS timeZone FROM businesses WHERE id = ?",
+        `SELECT id, name, time_zone AS timeZone, locale, currency
+         FROM businesses WHERE id = ?`,
       )
-      .get(req.user.businessId) as
-      | { id: string; name: string; timeZone: string }
+      .get(businessId) as
+      | {
+          id: string;
+          name: string;
+          timeZone: string;
+          locale: string;
+          currency: string;
+        }
       | undefined;
     if (!business) {
       res.status(404).json({ error: "Business not found." });
@@ -513,6 +672,288 @@ app.get(
     res.json({ business });
   },
 );
+
+app.put(
+  "/api/business/settings",
+  requireAuth,
+  csrfGuard,
+  requireRole("owner"),
+  (req, res) => {
+    const parsed = businessSettingsSchema.safeParse(req.body);
+    if (!parsed.success) {
+      sendValidationError(res, parsed.error);
+      return;
+    }
+
+    const { name, timeZone, locale, currency } = parsed.data;
+    if (!validTimeZone(timeZone)) {
+      res.status(400).json({ error: "Choose a valid IANA time zone." });
+      return;
+    }
+    if (!validLocale(locale)) {
+      res.status(400).json({ error: "Choose a valid locale." });
+      return;
+    }
+    if (!validCurrency(currency)) {
+      res.status(400).json({ error: "Choose a valid three-letter currency code." });
+      return;
+    }
+    const businessId = businessIdForRequest(req, res);
+    if (!businessId) {
+      return;
+    }
+
+    const result = db
+      .prepare(
+        `UPDATE businesses
+         SET name = ?, time_zone = ?, locale = ?, currency = ?
+         WHERE id = ?`,
+      )
+      .run(name, timeZone, locale, currency, businessId);
+    if (result.changes === 0) {
+      res.status(404).json({ error: "Business not found." });
+      return;
+    }
+    res.json({
+      business: { id: businessId, name, timeZone, locale, currency },
+    });
+  },
+);
+
+app.get(
+  "/api/business/staff",
+  requireAuth,
+  requireRole("owner"),
+  (req, res) => {
+    const businessId = businessIdForRequest(req, res);
+    if (!businessId) {
+      return;
+    }
+    const staff = db
+      .prepare(
+        `SELECT id, name, email FROM users
+         WHERE business_id = ? AND role = 'staff'
+         ORDER BY name COLLATE NOCASE`,
+      )
+      .all(businessId) as Array<{ id: string; name: string; email: string }>;
+    res.json({ staff });
+  },
+);
+
+app.get(
+  "/api/business/services",
+  requireAuth,
+  requireRole("owner", "staff"),
+  (req, res) => {
+    const businessId = businessIdForRequest(req, res);
+    if (!businessId) {
+      return;
+    }
+    res.json({ services: listBusinessServices(businessId) });
+  },
+);
+
+app.post(
+  "/api/business/services",
+  requireAuth,
+  csrfGuard,
+  requireRole("owner"),
+  (req, res) => {
+    const parsed = serviceSchema.safeParse(req.body);
+    if (!parsed.success) {
+      sendValidationError(res, parsed.error);
+      return;
+    }
+
+    const businessId = businessIdForRequest(req, res);
+    if (!businessId) {
+      return;
+    }
+    const { staffIds, ...service } = parsed.data;
+    if (!validateServiceStaff(businessId, staffIds)) {
+      res.status(400).json({
+        error: "Select team members who belong to this business.",
+      });
+      return;
+    }
+    if (!validCurrency(service.priceCurrency)) {
+      res.status(400).json({ error: "Choose a valid currency for this service." });
+      return;
+    }
+
+    const serviceId = randomUUID();
+    const timestamp = new Date().toISOString();
+    const createService = db.transaction(() => {
+      db.prepare(
+        `INSERT INTO services
+         (id, business_id, name, description, duration_minutes, price_minor,
+          price_currency, buffer_minutes, category, online_booking, is_active,
+          created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run(
+        serviceId,
+        businessId,
+        service.name,
+        service.description,
+        service.durationMinutes,
+        service.priceMinor,
+        service.priceCurrency,
+        service.bufferMinutes,
+        service.category || null,
+        Number(service.onlineBooking),
+        Number(service.isActive),
+        timestamp,
+        timestamp,
+      );
+      replaceServiceStaff(businessId, serviceId, staffIds);
+    });
+    createService();
+    res.status(201).json({
+      service: listBusinessServices(businessId).find(
+        (entry) => entry.id === serviceId,
+      ),
+    });
+  },
+);
+
+app.put(
+  "/api/business/services/:id",
+  requireAuth,
+  csrfGuard,
+  requireRole("owner"),
+  (req, res) => {
+    const parsed = serviceSchema.safeParse(req.body);
+    if (!parsed.success) {
+      sendValidationError(res, parsed.error);
+      return;
+    }
+    const businessId = businessIdForRequest(req, res);
+    if (!businessId) {
+      return;
+    }
+    const parsedId = z.uuid().safeParse(req.params.id);
+    if (!parsedId.success) {
+      res.status(404).json({ error: "Service not found." });
+      return;
+    }
+    const serviceId = parsedId.data;
+    const existing = db
+      .prepare("SELECT id FROM services WHERE id = ? AND business_id = ?")
+      .get(serviceId, businessId);
+    if (!existing) {
+      res.status(404).json({ error: "Service not found." });
+      return;
+    }
+
+    const { staffIds, ...service } = parsed.data;
+    if (!validateServiceStaff(businessId, staffIds)) {
+      res.status(400).json({
+        error: "Select team members who belong to this business.",
+      });
+      return;
+    }
+    if (!validCurrency(service.priceCurrency)) {
+      res.status(400).json({ error: "Choose a valid currency for this service." });
+      return;
+    }
+    const timestamp = new Date().toISOString();
+    const updateService = db.transaction(() => {
+      db.prepare(
+        `UPDATE services
+         SET name = ?, description = ?, duration_minutes = ?, price_minor = ?,
+             price_currency = ?, buffer_minutes = ?, category = ?,
+             online_booking = ?, is_active = ?, updated_at = ?
+         WHERE id = ? AND business_id = ?`,
+      ).run(
+        service.name,
+        service.description,
+        service.durationMinutes,
+        service.priceMinor,
+        service.priceCurrency,
+        service.bufferMinutes,
+        service.category || null,
+        Number(service.onlineBooking),
+        Number(service.isActive),
+        timestamp,
+        serviceId,
+        businessId,
+      );
+      db.prepare(
+        "DELETE FROM staff_services WHERE service_id = ? AND business_id = ?",
+      ).run(serviceId, businessId);
+      replaceServiceStaff(businessId, serviceId, staffIds);
+    });
+    updateService();
+    res.json({
+      service: listBusinessServices(businessId).find(
+        (entry) => entry.id === serviceId,
+      ),
+    });
+  },
+);
+
+app.delete(
+  "/api/business/services/:id",
+  requireAuth,
+  csrfGuard,
+  requireRole("owner"),
+  (req, res) => {
+    const businessId = businessIdForRequest(req, res);
+    if (!businessId) {
+      return;
+    }
+    const parsedId = z.uuid().safeParse(req.params.id);
+    if (!parsedId.success) {
+      res.status(404).json({ error: "Active service not found." });
+      return;
+    }
+    const result = db
+      .prepare(
+        `UPDATE services SET is_active = 0, updated_at = ?
+         WHERE id = ? AND business_id = ?`,
+      )
+      .run(new Date().toISOString(), parsedId.data, businessId);
+    if (result.changes === 0) {
+      res.status(404).json({ error: "Service not found." });
+      return;
+    }
+    res.status(204).end();
+  },
+);
+
+app.get("/api/public/businesses/:businessId/services", (req, res) => {
+  const parsedId = z.uuid().safeParse(req.params.businessId);
+  if (!parsedId.success) {
+    res.status(404).json({ error: "Business not found." });
+    return;
+  }
+  const business = db
+    .prepare(
+      `SELECT id, name, time_zone AS timeZone, locale, currency
+       FROM businesses WHERE id = ?`,
+    )
+    .get(parsedId.data) as BusinessPublicDetails | undefined;
+  if (!business) {
+    res.status(404).json({ error: "Business not found." });
+    return;
+  }
+  const services = db
+    .prepare(
+      `SELECT id, name, description, duration_minutes AS durationMinutes,
+              price_minor AS priceMinor, price_currency AS priceCurrency,
+              buffer_minutes AS bufferMinutes, category
+       FROM services
+       WHERE business_id = ? AND is_active = 1 AND online_booking = 1
+         AND EXISTS (
+           SELECT 1 FROM staff_services
+           WHERE staff_services.business_id = services.business_id
+             AND staff_services.service_id = services.id
+         )
+       ORDER BY category COLLATE NOCASE, name COLLATE NOCASE`,
+    )
+    .all(business.id);
+  res.json({ business, services });
+});
 
 const clientBuild = path.resolve("dist/client");
 if (existsSync(clientBuild)) {

@@ -14,6 +14,34 @@ type AuthResponse = {
   sessionExpiresAt: string;
 };
 
+type Business = {
+  id: string;
+  name: string;
+  timeZone: string;
+  locale: string;
+  currency: string;
+};
+
+type StaffMember = {
+  id: string;
+  name: string;
+  email: string;
+};
+
+type CatalogService = {
+  id: string;
+  name: string;
+  description: string;
+  durationMinutes: number;
+  priceMinor: number;
+  priceCurrency: string;
+  bufferMinutes: number;
+  category: string;
+  onlineBooking: boolean;
+  isActive: boolean;
+  staffIds: string[];
+};
+
 type Screen = "login" | "register" | "forgot" | "reset" | "invite";
 type AccountType = "owner" | "customer";
 
@@ -329,6 +357,391 @@ function Alert({ message }: { message: string }) {
   ) : null;
 }
 
+function currencyDigits(currency: string, locale: string): number {
+  return new Intl.NumberFormat(locale, {
+    style: "currency",
+    currency,
+  }).resolvedOptions().maximumFractionDigits ?? 2;
+}
+
+function minorToAmount(amount: number, currency: string, locale: string): string {
+  const digits = currencyDigits(currency, locale);
+  return (amount / 10 ** digits).toFixed(digits);
+}
+
+function BusinessWorkspace() {
+  const [business, setBusiness] = useState<Business | null>(null);
+  const [staff, setStaff] = useState<StaffMember[]>([]);
+  const [services, setServices] = useState<CatalogService[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+  const [editor, setEditor] = useState<"new" | CatalogService | null>(null);
+
+  const loadWorkspace = useCallback(async () => {
+    setError("");
+    try {
+      const [businessResponse, staffResponse, serviceResponse] =
+        await Promise.all([
+          api<{ business: Business }>("/api/business"),
+          api<{ staff: StaffMember[] }>("/api/business/staff"),
+          api<{ services: CatalogService[] }>("/api/business/services"),
+        ]);
+      setBusiness(businessResponse.business);
+      setStaff(staffResponse.staff);
+      setServices(serviceResponse.services);
+    } catch (loadError) {
+      setError(
+        loadError instanceof Error
+          ? loadError.message
+          : "Unable to load your business catalogue.",
+      );
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadWorkspace();
+  }, [loadWorkspace]);
+
+  async function saveBusiness(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!business) return;
+    setError("");
+    setNotice("");
+    const formData = new FormData(event.currentTarget);
+    try {
+      const response = await api<{ business: Business }>(
+        "/api/business/settings",
+        {
+          method: "PUT",
+          body: JSON.stringify({
+            name: formData.get("businessName"),
+            timeZone: formData.get("timeZone"),
+            locale: formData.get("locale"),
+            currency: formData.get("currency"),
+          }),
+        },
+      );
+      setBusiness(response.business);
+      setNotice("Business settings saved.");
+    } catch (saveError) {
+      setError(
+        saveError instanceof Error
+          ? saveError.message
+          : "Unable to save business settings.",
+      );
+    }
+  }
+
+  async function saveService(
+    event: FormEvent<HTMLFormElement>,
+    serviceId?: string,
+  ) {
+    event.preventDefault();
+    if (!business) return;
+    setError("");
+    setNotice("");
+
+    const formData = new FormData(event.currentTarget);
+    const amount = Number(formData.get("price"));
+    const priceCurrency = String(formData.get("priceCurrency"));
+    const factor = 10 ** currencyDigits(priceCurrency, business.locale);
+    const payload = {
+      name: formData.get("name"),
+      description: formData.get("description"),
+      durationMinutes: Number(formData.get("durationMinutes")),
+      priceMinor: Math.round(amount * factor),
+      priceCurrency,
+      bufferMinutes: Number(formData.get("bufferMinutes")),
+      category: formData.get("category"),
+      onlineBooking: formData.get("onlineBooking") === "on",
+      isActive: formData.get("isActive") === "on",
+      staffIds: formData.getAll("staffIds").map(String),
+    };
+
+    try {
+      await api<{ service: CatalogService }>(
+        serviceId
+          ? `/api/business/services/${encodeURIComponent(serviceId)}`
+          : "/api/business/services",
+        {
+          method: serviceId ? "PUT" : "POST",
+          body: JSON.stringify(payload),
+        },
+      );
+      setNotice(serviceId ? "Service updated." : "Service added.");
+      setEditor(null);
+      await loadWorkspace();
+    } catch (saveError) {
+      setError(
+        saveError instanceof Error ? saveError.message : "Unable to save service.",
+      );
+    }
+  }
+
+  async function deactivateService(service: CatalogService) {
+    if (!window.confirm(`Deactivate “${service.name}”? It will remain in your catalogue but won't be available for new online bookings.`)) {
+      return;
+    }
+    setError("");
+    setNotice("");
+    try {
+      await api<void>(
+        `/api/business/services/${encodeURIComponent(service.id)}`,
+        { method: "DELETE" },
+      );
+      setNotice(`${service.name} was deactivated.`);
+      await loadWorkspace();
+    } catch (deactivateError) {
+      setError(
+        deactivateError instanceof Error
+          ? deactivateError.message
+          : "Unable to deactivate this service.",
+      );
+    }
+  }
+
+  if (loading) {
+    return (
+      <section className="workspace-loading" aria-live="polite">
+        Loading your business catalogue...
+      </section>
+    );
+  }
+
+  if (!business) {
+    return <Alert message={error || "Your business settings are unavailable."} />;
+  }
+
+  return (
+    <div className="business-workspace">
+      {error && <Alert message={error} />}
+      {notice && <p className="success-note" role="status">{notice}</p>}
+
+      <section className="workspace-section">
+        <div className="section-heading">
+          <div>
+            <span className="eyebrow">The essentials</span>
+            <h2>Business settings</h2>
+          </div>
+        </div>
+        <form className="business-settings-form" onSubmit={(event) => void saveBusiness(event)}>
+          <label>
+            Business name
+            <input name="businessName" defaultValue={business.name} required minLength={2} maxLength={100} />
+          </label>
+          <label>
+            Time zone
+            <input name="timeZone" defaultValue={business.timeZone} required maxLength={100} placeholder="America/Toronto" />
+            <span className="field-hint">Use an IANA time zone, such as America/Toronto.</span>
+          </label>
+          <label>
+            Currency
+            <input name="currency" defaultValue={business.currency} required minLength={3} maxLength={3} pattern="[A-Za-z]{3}" />
+            <span className="field-hint">Three-letter currency code, for example CAD or USD.</span>
+          </label>
+          <label>
+            Locale
+            <input name="locale" defaultValue={business.locale} required maxLength={40} placeholder="en-CA" />
+            <span className="field-hint">Controls currency formatting, e.g. en-CA.</span>
+          </label>
+          <button className="primary-button settings-submit" type="submit">Save settings <span>→</span></button>
+        </form>
+      </section>
+
+      <section className="workspace-section catalogue-section">
+        <div className="section-heading">
+          <div>
+            <span className="eyebrow">What you offer</span>
+            <h2>Your services <span className="item-count">{services.length}</span></h2>
+          </div>
+          {!editor && (
+            <button className="primary-button add-service-button" onClick={() => setEditor("new")}>
+              <span aria-hidden="true">+</span> Add a service
+            </button>
+          )}
+        </div>
+        {editor && (
+          <ServiceEditor
+            key={editor === "new" ? "new" : editor.id}
+            service={editor === "new" ? undefined : editor}
+            staff={staff}
+            business={business}
+            onCancel={() => setEditor(null)}
+            onSubmit={(event) =>
+              void saveService(
+                event,
+                editor === "new" ? undefined : editor.id,
+              )
+            }
+          />
+        )}
+        {services.length === 0 && !editor ? (
+          <div className="empty-catalogue">
+            <span className="empty-spark">✳</span>
+            <h3>A good place to begin.</h3>
+            <p>Add your first service with its duration, price, and booking details.</p>
+            <button className="text-button" onClick={() => setEditor("new")}>Add your first service →</button>
+          </div>
+        ) : (
+          <div className="service-list">
+            {services.map((service) => (
+              <article
+                className={`service-row${service.isActive ? "" : " service-row-inactive"}`}
+                key={service.id}
+              >
+                <div className="service-detail">
+                  <div className="service-title-line">
+                    <h3>{service.name}</h3>
+                    {!service.isActive && <span className="inactive-pill">Inactive</span>}
+                    {service.category && <span className="category-pill">{service.category}</span>}
+                  </div>
+                  {service.description && <p>{service.description}</p>}
+                  <div className="service-meta">
+                    <span>{service.durationMinutes} min</span>
+                    {service.bufferMinutes > 0 && <span>{service.bufferMinutes} min buffer</span>}
+                    <span>{service.onlineBooking ? "Online booking on" : "Online booking off"}</span>
+                    <span>{service.staffIds.length ? `${service.staffIds.length} team member${service.staffIds.length === 1 ? "" : "s"}` : "No team members assigned"}</span>
+                  </div>
+                </div>
+                <div className="service-actions">
+                  <strong>
+                    {new Intl.NumberFormat(business.locale, {
+                      style: "currency",
+                      currency: service.priceCurrency,
+                    }).format(service.priceMinor / 10 ** currencyDigits(service.priceCurrency, business.locale))}
+                  </strong>
+                  <button className="text-button" onClick={() => setEditor(service)}>Edit</button>
+                  {service.isActive && (
+                    <button className="text-button deactivate-button" onClick={() => void deactivateService(service)}>
+                      Deactivate
+                    </button>
+                  )}
+                </div>
+              </article>
+            ))}
+          </div>
+        )}
+      </section>
+    </div>
+  );
+}
+
+function ServiceEditor({
+  service,
+  staff,
+  business,
+  onCancel,
+  onSubmit,
+}: {
+  service?: CatalogService;
+  staff: StaffMember[];
+  business: Business;
+  onCancel: () => void;
+  onSubmit: (event: FormEvent<HTMLFormElement>) => void;
+}) {
+  const [selectedStaff, setSelectedStaff] = useState(service?.staffIds ?? []);
+  const [priceCurrency, setPriceCurrency] = useState(
+    service?.priceCurrency ?? business.currency,
+  );
+  const digits = currencyDigits(priceCurrency, business.locale);
+  const priceStep = digits === 0 ? "1" : `0.${"0".repeat(digits - 1)}1`;
+  const currencies = [
+    ...new Set([
+      business.currency,
+      service?.priceCurrency ?? "",
+      "USD",
+      "CAD",
+      "EUR",
+      "GBP",
+      "AUD",
+      "NZD",
+      "JPY",
+      "CHF",
+      "INR",
+    ]),
+  ].filter(Boolean);
+
+  function toggleStaff(staffId: string) {
+    setSelectedStaff((current) =>
+      current.includes(staffId)
+        ? current.filter((id) => id !== staffId)
+        : [...current, staffId],
+    );
+  }
+
+  return (
+    <form className="service-editor" onSubmit={onSubmit}>
+      <div className="editor-heading">
+        <h3>{service ? "Edit service" : "Add a service"}</h3>
+        <button className="text-button" type="button" onClick={onCancel}>Cancel</button>
+      </div>
+      <div className="editor-grid">
+        <label className="editor-wide">
+          Service name
+          <input name="name" defaultValue={service?.name} required minLength={2} maxLength={100} placeholder="e.g. Signature haircut" />
+        </label>
+        <label className="editor-wide">
+          Description
+          <textarea name="description" defaultValue={service?.description} maxLength={1000} rows={2} placeholder="A short description customers can use to choose the right service." />
+        </label>
+        <label>
+          Duration (minutes)
+          <input name="durationMinutes" type="number" defaultValue={service?.durationMinutes ?? 30} min={5} max={1440} step={5} required />
+        </label>
+        <label>
+          Price
+          <input name="price" type="number" defaultValue={service ? minorToAmount(service.priceMinor, service.priceCurrency, business.locale) : ""} min={0} max={1_000_000_000 / 10 ** digits} step={priceStep} required placeholder={minorToAmount(0, priceCurrency, business.locale)} />
+        </label>
+        <label>
+          Price currency
+          <select name="priceCurrency" value={priceCurrency} onChange={(event) => setPriceCurrency(event.target.value)}>
+            {currencies.map((currency) => <option value={currency} key={currency}>{currency}</option>)}
+          </select>
+        </label>
+        <label>
+          Buffer after service (minutes)
+          <input name="bufferMinutes" type="number" defaultValue={service?.bufferMinutes ?? 0} min={0} max={240} step={5} />
+        </label>
+        <label>
+          Category
+          <input name="category" defaultValue={service?.category} maxLength={60} placeholder="Hair, wellness, consultation..." />
+        </label>
+      </div>
+      <fieldset className="staff-assignment">
+        <legend>Team members who can provide this service</legend>
+        {staff.length === 0 ? (
+          <p>Invite a team member first; you can assign services to them here.</p>
+        ) : (
+          <div className="staff-choice-list">
+            {staff.map((member) => (
+              <label className="staff-choice" key={member.id}>
+                <input
+                  type="checkbox"
+                  name="staffIds"
+                  value={member.id}
+                  checked={selectedStaff.includes(member.id)}
+                  onChange={() => toggleStaff(member.id)}
+                />
+                <span><strong>{member.name}</strong><small>{member.email}</small></span>
+              </label>
+            ))}
+          </div>
+        )}
+      </fieldset>
+      <div className="service-toggles">
+        <label><input type="checkbox" name="onlineBooking" defaultChecked={service?.onlineBooking ?? true} /> Available for online booking</label>
+        <label><input type="checkbox" name="isActive" defaultChecked={service?.isActive ?? true} /> Active in the catalogue</label>
+      </div>
+      <div className="editor-actions">
+        <button className="primary-button" type="submit">{service ? "Save changes" : "Add service"} <span>→</span></button>
+      </div>
+    </form>
+  );
+}
+
 function LoginForm({
   message,
   onSubmit,
@@ -593,32 +1006,35 @@ function Dashboard({
           )}
         </section>
         {user.role === "owner" && (
-          <section className="invite-panel">
-            <div>
-              <span className="eyebrow">Growing a team?</span>
-              <h2>Bring your people along.</h2>
-              <p>Send a secure invitation so a teammate can join your business workspace.</p>
-            </div>
-            <form
-              className="invite-form"
-              onSubmit={(event) =>
-                onInvite(event, event.currentTarget)
-              }
-            >
-              <label htmlFor="staff-email">Team member’s email</label>
-              <div className="invite-controls">
-                <input
-                  id="staff-email"
-                  name="email"
-                  type="email"
-                  required
-                  maxLength={254}
-                  placeholder="teammate@example.com"
-                />
-                <button className="primary-button" type="submit">Send invite <span>→</span></button>
+          <>
+            <section className="invite-panel">
+              <div>
+                <span className="eyebrow">Growing a team?</span>
+                <h2>Bring your people along.</h2>
+                <p>Send a secure invitation so a teammate can join your business workspace.</p>
               </div>
-            </form>
-          </section>
+              <form
+                className="invite-form"
+                onSubmit={(event) =>
+                  onInvite(event, event.currentTarget)
+                }
+              >
+                <label htmlFor="staff-email">Team member’s email</label>
+                <div className="invite-controls">
+                  <input
+                    id="staff-email"
+                    name="email"
+                    type="email"
+                    required
+                    maxLength={254}
+                    placeholder="teammate@example.com"
+                  />
+                  <button className="primary-button" type="submit">Send invite <span>→</span></button>
+                </div>
+              </form>
+            </section>
+            <BusinessWorkspace />
+          </>
         )}
       </div>
       <footer className="dashboard-footer">

@@ -6,7 +6,7 @@ Bookora is an appointment booking and business-management application for small 
 
 ## Product overview
 
-Bookora is being built around reliable scheduling, clear staff availability, safe appointment management, and a simple customer booking experience. Its design direction combines deep teal and emerald with warm neutrals and restrained gold accents.
+Bookora is being built around reliable scheduling, clear staff availability, safe appointment management, and a simple customer booking experience. Its design direction combines deep teal and emerald with warm neutrals and restrained gold accents. Business owners can configure their business details and time zone, manage service prices and booking settings, assign invited staff to services, and publish eligible active services in a public catalogue.
 
 ## Architecture
 
@@ -54,6 +54,8 @@ The server reads configuration from its environment:
 
 The database schema is initialized when the server starts. Back up the SQLite file before replacing or moving it. Password reset and staff invitation delivery require all SMTP settings; those endpoints report an explicit configuration error if they are missing. In production, set `NODE_ENV=production` so session cookies are marked `Secure`, serve the application over HTTPS, and set `APP_ORIGIN` to the canonical HTTPS URL.
 
+The public catalogue is available at `GET /api/public/businesses/:businessId/services`. It includes only active online-bookable services assigned to at least one staff member. Business settings and catalogue management require an authenticated owner; staff may view their own business catalogue. Service prices retain their own currency so changing the business's default currency does not reinterpret existing prices.
+
 Local environment files and database files are intentionally excluded from Git. The working implementation plan is kept at [plan/PLAN.md](./plan/PLAN.md) and is intentionally ignored by Git.
 
 ## Manual verification
@@ -65,3 +67,4 @@ Run `npm run typecheck` and `npm run build`, then start the server and verify:
 3. Sign out and confirm the old session no longer accesses protected endpoints.
 4. Try an incorrect password, missing CSRF header on sign-out, and invalid registration values; each should be rejected.
 5. Configure SMTP and verify a reset link and owner-issued staff invitation can be used once and expire as described.
+6. As an owner, save a valid IANA time zone, locale, and currency; add/edit/deactivate services and verify staff eligibility and public catalogue visibility.
